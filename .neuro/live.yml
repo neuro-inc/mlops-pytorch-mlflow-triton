@@ -1,0 +1,100 @@
+kind: live
+title: mlops-pytorch-mlflow-triton
+
+defaults:
+  life_span: 1d
+
+images:
+  train:
+    ref: image:/$[[ project.owner ]]/$[[ flow.project_id ]]:v1
+    dockerfile: $[[ flow.workspace ]]/Dockerfile
+    context: $[[ flow.workspace ]]/
+
+volumes:
+  data:
+    remote: storage:/$[[ project.owner ]]/$[[ flow.project_id ]]/data
+    mount: /project/data
+    local: data
+  code:
+    remote: storage:/$[[ project.owner ]]/$[[ flow.project_id ]]/modules
+    mount: /project/modules
+    local: modules
+  config:
+    remote: storage:/$[[ project.owner ]]/$[[ flow.project_id ]]/config
+    mount: /project/config
+    local: config
+  notebooks:
+    remote: storage:/$[[ project.owner ]]/$[[ flow.project_id ]]/notebooks
+    mount: /project/notebooks
+    local: notebooks
+  results:
+    remote: storage:/$[[ project.owner ]]/$[[ flow.project_id ]]/results
+    mount: /project/results
+    local: results
+  project:
+    remote: storage:/$[[ project.owner ]]/$[[ flow.project_id ]]
+    mount: /project
+    local: .
+
+jobs:
+  remote_debug:
+    action: gh:neuro-actions/remote_debug@v1.0.0
+    args:
+      image: $[[ images.train.ref ]]
+      volumes_data_remote: $[[ volumes.data.remote ]]
+      volumes_code_remote: $[[ volumes.code.remote ]]
+      volumes_config_remote: $[[ volumes.config.remote ]]
+      volumes_results_remote: $[[ volumes.results.remote ]]
+
+  train:
+    image: $[[ images.train.ref ]]
+    life_span: 10d
+    volumes:
+      - $[[ volumes.data.ref_ro ]]
+      - $[[ upload(volumes.code).ref_ro ]]
+      - $[[ volumes.config.ref_ro ]]
+      - $[[ volumes.results.ref_rw ]]
+    env:
+      EXPOSE_SSH: "yes"
+      PYTHONPATH: $[[ volumes.code.mount ]]
+    bash: |
+        cd $[[ volumes.project.mount ]]
+        python -u $[[ volumes.code.mount ]]/train.py --data $[[ volumes.data.mount ]]
+
+  multitrain:
+    image: $[[ images.train.ref ]]
+    detach: False
+    life_span: 10d
+    volumes:
+      - $[[ volumes.data.ref_ro ]]
+      - $[[ volumes.code.ref_ro ]]
+      - $[[ volumes.config.ref_ro ]]
+      - $[[ volumes.results.ref_rw ]]
+    env:
+      EXPOSE_SSH: "yes"
+      PYTHONPATH: $[[ volumes.code.mount ]]
+    multi: true
+    bash: |
+        cd $[[ volumes.project.mount ]]
+        python $[[ volumes.code.mount ]]/train.py --data $[[ volumes.data.mount ]] $[[ multi.args ]]
+
+  jupyter:
+    action: gh:neuro-actions/jupyter@v1.1.2
+    args:
+      image: $[[ images.train.ref ]]
+      multi_args: $[[ multi.args ]]
+      volumes_data_remote: $[[ volumes.data.remote ]]
+      volumes_code_remote: $[[ volumes.code.remote ]]
+      volumes_config_remote: $[[ volumes.config.remote ]]
+      volumes_notebooks_remote: $[[ volumes.notebooks.remote ]]
+      volumes_results_remote: $[[ volumes.results.remote ]]
+
+  tensorboard:
+    action: gh:neuro-actions/tensorboard@v1.0.0
+    args:
+      volumes_results_remote: $[[ volumes.results.remote ]]
+
+  filebrowser:
+    action: gh:neuro-actions/filebrowser@v1.0.1
+    args:
+      volumes_project_remote: $[[ volumes.project.remote ]]
