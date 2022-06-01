@@ -1,28 +1,11 @@
 kind: live
 title: mlops-pytorch-mlflow-triton
 
-defaults:
-  life_span: 1d
-
-images:
-  train:
-    ref: image:/$[[ project.owner ]]/$[[ flow.project_id ]]:v1
-    dockerfile: $[[ flow.workspace ]]/Dockerfile
-    context: $[[ flow.workspace ]]/
-
 volumes:
   data:
     remote: storage:/$[[ project.owner ]]/$[[ flow.project_id ]]/data
     mount: /project/data
     local: data
-  code:
-    remote: storage:/$[[ project.owner ]]/$[[ flow.project_id ]]/modules
-    mount: /project/modules
-    local: modules
-  config:
-    remote: storage:/$[[ project.owner ]]/$[[ flow.project_id ]]/config
-    mount: /project/config
-    local: config
   notebooks:
     remote: storage:/$[[ project.owner ]]/$[[ flow.project_id ]]/notebooks
     mount: /project/notebooks
@@ -31,70 +14,60 @@ volumes:
     remote: storage:/$[[ project.owner ]]/$[[ flow.project_id ]]/results
     mount: /project/results
     local: results
-  project:
-    remote: storage:/$[[ project.owner ]]/$[[ flow.project_id ]]
-    mount: /project
-    local: .
+  triton_model_repo:
+    remote: storage:/$[[ project.owner ]]/$[[ flow.project_id ]]/triton_model_repo
+    mount: /project/triton_model_repo
 
 jobs:
-  remote_debug:
-    action: gh:neuro-actions/remote_debug@v1.0.0
-    args:
-      image: $[[ images.train.ref ]]
-      volumes_data_remote: $[[ volumes.data.remote ]]
-      volumes_code_remote: $[[ volumes.code.remote ]]
-      volumes_config_remote: $[[ volumes.config.remote ]]
-      volumes_results_remote: $[[ volumes.results.remote ]]
-
-  train:
-    image: $[[ images.train.ref ]]
-    life_span: 10d
-    volumes:
-      - $[[ volumes.data.ref_ro ]]
-      - $[[ upload(volumes.code).ref_ro ]]
-      - $[[ volumes.config.ref_ro ]]
-      - $[[ volumes.results.ref_rw ]]
-    env:
-      EXPOSE_SSH: "yes"
-      PYTHONPATH: $[[ volumes.code.mount ]]
-    bash: |
-        cd $[[ volumes.project.mount ]]
-        python -u $[[ volumes.code.mount ]]/train.py --data $[[ volumes.data.mount ]]
-
-  multitrain:
-    image: $[[ images.train.ref ]]
-    detach: False
-    life_span: 10d
-    volumes:
-      - $[[ volumes.data.ref_ro ]]
-      - $[[ volumes.code.ref_ro ]]
-      - $[[ volumes.config.ref_ro ]]
-      - $[[ volumes.results.ref_rw ]]
-    env:
-      EXPOSE_SSH: "yes"
-      PYTHONPATH: $[[ volumes.code.mount ]]
-    multi: true
-    bash: |
-        cd $[[ volumes.project.mount ]]
-        python $[[ volumes.code.mount ]]/train.py --data $[[ volumes.data.mount ]] $[[ multi.args ]]
 
   jupyter:
-    action: gh:neuro-actions/jupyter@v1.1.2
-    args:
-      image: $[[ images.train.ref ]]
-      multi_args: $[[ multi.args ]]
-      volumes_data_remote: $[[ volumes.data.remote ]]
-      volumes_code_remote: $[[ volumes.code.remote ]]
-      volumes_config_remote: $[[ volumes.config.remote ]]
-      volumes_notebooks_remote: $[[ volumes.notebooks.remote ]]
-      volumes_results_remote: $[[ volumes.results.remote ]]
+    image: ghcr.io/neuro-inc/base:v22.5.0-runtime
+    preset: gpu-small
+    http_port: 8888
+    http_auth: True
+    browse: True
+    detach: True
+    volumes:
+      - $[[ volumes.data.ref_rw ]]
+      - $[[ volumes.notebooks.ref_rw ]]
+      - $[[ volumes.results.ref_rw ]]
+      - ${{ volumes.triton_model_repo.ref_rw }}
+    env:
+      MLFLOW_TRACKING_URI: http://${{ inspect_job('mlflow_server').internal_hostname_named }}:5000
+      TRITON_URL: http://${{ inspect_job('triton_server').internal_hostname_named }}:8000
+      TRITON_MODEL_REPO: ${{ volumes.triton_model_repo.mount }}
+    cmd: >-
+      jupyter notebook
+        --no-browser
+        --ip=0.0.0.0
+        --port=8888
+        --allow-root
+        --NotebookApp.token=
+        --notebook-dir=$[[ volumes.notebooks.mount ]]
+        --NotebookApp.shutdown_no_activity_timeout=900
+        --MappingKernelManager.cull_idle_timeout=7200
+        --MappingKernelManager.cull_connected=True
 
-  tensorboard:
-    action: gh:neuro-actions/tensorboard@v1.0.0
+  mlflow_server:
+    action: gh:neuro-actions/mlflow@v1.20.2
     args:
-      volumes_results_remote: $[[ volumes.results.remote ]]
+      backend_store_uri: sqlite:///${{ volumes.results.mount }}/mlflow.db
+      default_artifact_root: ${{ volumes.results.mount }}
+      volumes: "${{ to_json( [volumes.results.ref_rw] ) }}"
 
-  filebrowser:
-    action: gh:neuro-actions/filebrowser@v1.0.1
-    args:
-      volumes_project_remote: $[[ volumes.project.remote ]]
+  triton_server:
+    # note: the image version depends on the underlying drivers version.
+    # compativility matrix is here: https://docs.nvidia.com/deeplearning/frameworks/support-matrix/index.html
+    # nvcr.io/nvidia/tritonserver:21.12-py3 is for Driver Version: 495.29.05, CUDA Version: 11.5
+    image: nvcr.io/nvidia/tritonserver:21.12-py3
+    preset: gpu-small
+    detach: True
+    volumes:
+      - ${{ volumes.results.ref_ro }}
+      - ${{ volumes.triton_model_repo.ref_rw }}
+    http_port: 8000
+    bash: |
+      tritonserver \
+        --model-repository=${{ volumes.triton_model_repo.mount }} \
+        --model-control-mode=explicit \
+        --strict-model-config=false
