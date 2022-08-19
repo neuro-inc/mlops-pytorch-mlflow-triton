@@ -49,7 +49,7 @@ jobs:
         --MappingKernelManager.cull_connected=True
 
   mlflow_server:
-    action: gh:neuro-actions/mlflow@v1.20.2
+    action: gh:neuro-actions/mlflow@v1.28.0
     args:
       backend_store_uri: sqlite:///${{ volumes.results.mount }}/mlflow.db
       default_artifact_root: ${{ volumes.results.mount }}
